@@ -45,23 +45,23 @@ puts:
     ; "save" modified regs
     push si
     push ax
-.loop:
-    ; `lodsb` loads next character into al
-    lodsb
-    ; if char is null, finish
-    or al, al
-    jz .done
-    ; print char in al
-    mov ah, 0x0e
-    mov bh, 0
-    int 0x10
-    ; loop
-    jmp .loop
-.done:
-    ; restore modified regs
-    pop ax
-    pop si
-    ret
+    .loop:
+        ; `lodsb` loads next character into al
+        lodsb
+        ; if char is null, finish
+        or al, al
+        jz .done
+        ; print char in al
+        mov ah, 0x0e
+        mov bh, 0
+        int 0x10
+        ; loop
+        jmp .loop
+    .done:
+        ; restore modified regs
+        pop ax
+        pop si
+        ret
 
 main:
     ; set data segments to 0
@@ -73,17 +73,140 @@ main:
     mov ss, ax
     mov sp, 0x7C00
 
+    ; read from disk
+    mov[ebr_drive_number], dl
+
+    mov ax, 1       ; lba=1, second sector from disk
+    mov cl, 1       ; 1 sector to read
+    mov bx, 0x7E00  ; data should be after the bootloader
+    call disk_read
+
     ; print boot msg
     mov si, szBootMsg
     call puts
 
+    cli
     hlt
 
-.halt:
-    jmp .halt
+;
+; err handlers
+;
+
+floppy_error:
+    mov si, szReadFailedMsg
+    call puts
+    jmp wait_key_and_reboot
+
+wait_key_and_reboot:
+    mov ah, 0
+    int 16h         ; wait for input
+    jmp 0FFFFh:0    ; jump to beginning of BIOS
+
+    .halt:
+        cli
+        hlt
+
+;
+; disk utilities
+;
+
+; converts an lba address to chs
+;
+; params:
+;  * ax: lba address
+;
+; returns:
+;  * cx 0-5: sector
+;  * cx 6-15: cylinder
+;  * dx: head
+lba_to_chs:
+
+    push ax
+    push dx
+
+    xor dx,dx
+    div word [bdb_sectors_per_track]    ; ax = lba / sectors_per_track,
+                                        ; dx = lba % sectors_per_track
+    inc dx                              ; sector numbers start at 1
+    mov cx, dx
+
+    xor dx,dx
+    div word [bdb_heads]                ; ax = (lba/ sectors_per_track) / heads,
+                                        ; dx = (lba / sectors_per_track) % heads
+    mov dh, dl
+    mov ch, al                          ; ch = cylinder (lower 8 bits)
+    shl ah, 6
+    or cl, ah                           ; put upper 2 bits of cyl in cl
+
+    pop ax
+    mov dl, al
+    pop ax
+    ret
+
+; reads sectors form a disk
+;
+; params:
+;  * ax: lba address
+;  * cl: sectors read count
+;  * dl: drive number
+;  * es:bx: memroy addr to store read data
+disk_read:
+
+    push ax
+    push bx
+    push cx
+    push dx
+    push di
+
+    push cx
+    call lba_to_chs
+    pop ax
+
+    mov ah, 02h
+    mov di, 5   ; established standard is to attempt reading floppy 3 times
+
+    .retry:
+        pusha 
+        stc
+        int 13h     ; carry flag cleared is a success
+        jnc .done
+
+        popa
+        call disk_reset
+
+        dec di
+        test di, di
+        jnz .retry
+    
+    .fail:
+        jmp floppy_error
+    .done:
+        popa
+
+        pop di
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+
+        ret
+
+; resets disk
+;
+; params:
+;  * di: drive number
+disk_reset:
+    pusha
+    mov ah, 0
+    int 13h
+    jc floppy_error
+    popa
+    ret
+
 
 ; constants
-szBootMsg: db "Hello, gang!", ENDL, 0
+szBootMsg:          db "Hello, gang!", ENDL, 0
+szReadFailedMsg:    db "Disk read failed", ENDL, 0
 
 ; ---
 times 510-($-$$) db 0
